@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  DynamoDBPOC free-tier deployment with EC2 and API Gateway HTTP API.
+  Deploys one EC2 instance, IAM role, and HTTP API proxy in one stack.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dynamodbpoc
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  DynamoTableName:
+    Type: String
+    Default: records
+  CreateDynamoTable:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Set true to create the DynamoDB table in this stack.
+  AppPort:
+    Type: Number
+    Default: 8080
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t4g.micro
+    Description: Free-tier eligible type can vary by account/region.
+  ArtifactBucketName:
+    Type: String
+    Default: riyaz-dynamodbpoc-artifacts
+    Description: S3 bucket that stores the application JAR.
+  JarObjectKey:
+    Type: String
+    Default: DynamoDBPOC-0.0.1-SNAPSHOT.jar
+    Description: S3 object key for the application JAR.
+  ApiGatewayName:
+    Type: String
+    Default: dynamodbpoc-http-api
+
+  ApiAccessLogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues:
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+    Description: Retention (days) for API Gateway access logs.
+
+Resources:
+
+  # Optional DynamoDB table managed by this stack.
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    Condition: ShouldCreateDynamoTable
+    Properties:
+      TableName: !Ref DynamoTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  # Security group for the app instance.
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName} - allow app port inbound'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          CidrIp: 0.0.0.0/0
+
+  # IAM role + instance profile for DynamoDB and S3 access.
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}'
+        - PolicyName: S3ArtifactRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppRole
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !If
+        - UseArmAmi
+        - !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64}}'
+        - !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref AppInstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ec2'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          dnf update -y
+          dnf install -y java-21-amazon-corretto aws-cli
+
+          mkdir -p /opt/${ProjectName}
+          aws s3 cp s3://${ArtifactBucketName}/${JarObjectKey} /opt/${ProjectName}/app.jar
+
+          cat > /etc/systemd/system/${ProjectName}.service <<EOF
+          [Unit]
+          Description=${ProjectName} Spring Boot API
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/opt/${ProjectName}
+          Environment="AWS_DYNAMODB_PROFILE="
+          Environment="AWS_DYNAMODB_REGION=${AWS::Region}"
+          Environment="AWS_DYNAMODB_TABLE_NAME=${DynamoTableName}"
+          Environment="AWS_DYNAMODB_AUTO_CREATE_TABLE=false"
+          Environment="SPRINGDOC_SWAGGER_UI_PATH=/swagger-ui"
+          ExecStart=/usr/bin/java -jar /opt/${ProjectName}/app.jar
+          SuccessExitStatus=143
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          chown -R ec2-user:ec2-user /opt/${ProjectName}
+          systemctl daemon-reload
+          systemctl enable ${ProjectName}
+          systemctl start ${ProjectName}
+
+  # API Gateway HTTP API in the same stack.
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Ref ApiGatewayName
+      ProtocolType: HTTP
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${ApiGatewayName}-access'
+      RetentionInDays: !Ref ApiAccessLogRetentionDays
+
+  ApiAccessLogsResourcePolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-apigw-access-logs'
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowApiGatewayAccessLogs",
+              "Effect": "Allow",
+              "Principal": { "Service": "apigateway.amazonaws.com" },
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${ApiGatewayName}-access:*"
+            }
+          ]
+        }
+
+  HttpIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      IntegrationUri: !Sub 'http://${AppInstance.PublicIp}:${AppPort}'
+      PayloadFormatVersion: '1.0'
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: '$default'
+      Target: !Sub 'integrations/${HttpIntegration}'
+
+  HttpStage:
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn:
+      - ApiAccessLogsResourcePolicy
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: prod
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","status":"$context.status","responseLength":"$context.responseLength","integrationError":"$context.integrationErrorMessage","integrationStatus":"$context.integrationStatus","integrationLatency":"$context.integrationLatency"}
+
+Conditions:
+  UseArmAmi: !Equals [!Ref InstanceType, t4g.micro]
+  ShouldCreateDynamoTable: !Equals [!Ref CreateDynamoTable, 'true']
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref AppInstance
+  PublicIp:
+    Description: Public IP of EC2 instance
+    Value: !GetAtt AppInstance.PublicIp
+  DirectApiBaseUrl:
+    Description: Direct EC2 API base URL
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:${AppPort}'
+  DirectSwaggerUrl:
+    Description: Direct EC2 Swagger URL
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:${AppPort}/swagger-ui/index.html'
+  ApiGatewayEndpoint:
+    Description: API Gateway base URL
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  ApiGatewayRecordsUrl:
+    Description: API Gateway records endpoint
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/api/records'
+  ApiGatewaySwaggerUrl:
+    Description: API Gateway Swagger URL
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/swagger-ui/index.html'
+  EffectiveDynamoTableName:
+    Description: DynamoDB table used by the application
+    Value: !Ref DynamoTableName
+  ApiAccessLogGroupName:
+    Description: CloudWatch log group for API Gateway access logs
+    Value: !Ref ApiAccessLogGroup
+

@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Minimal API Gateway + CloudWatch Logs for DynamoDBPOC.
+  Forwards requests to EC2 instance and logs all traffic.
+
+Parameters:
+  EC2PublicIP:
+    Type: String
+    Description: EC2 public IP address (e.g., 54.123.45.67)
+  ApiName:
+    Type: String
+    Default: dynamodbpoc-api
+
+Resources:
+
+  # REST API
+  MyRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Ref ApiName
+      Description: DynamoDBPOC API with Logs
+
+  # Proxy Resource for all paths
+  ProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyRestApi
+      ParentId: !GetAtt MyRestApi.RootResourceId
+      PathPart: '{proxy+}'
+
+  # Proxy Method for {proxy+}
+  ProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyRestApi
+      ResourceId: !Ref ProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.proxy: true
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'http://${EC2PublicIP}:8080/{proxy}'
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
+
+  # Root Resource Method
+  RootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyRestApi
+      ResourceId: !GetAtt MyRestApi.RootResourceId
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'http://${EC2PublicIP}:8080/'
+
+  # API Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ProxyMethod
+      - RootMethod
+    Properties:
+      RestApiId: !Ref MyRestApi
+
+  # API Stage
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref MyRestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint
+    Value: !Sub 'https://${MyRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  SwaggerUrl:
+    Description: Swagger UI
+    Value: !Sub 'http://${EC2PublicIP}:8080/swagger-ui/index.html'
+

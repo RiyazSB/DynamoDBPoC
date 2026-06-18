@@ -1,0 +1,8 @@
+target/
+.idea/
+.git/
+*.iml
+README.md
+AWS_CREDENTIALS_SETUP.md
+IAM_PERMISSIONS_SETUP.md
+

@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DynamoDBPOC free-tier deployment on one EC2 instance (t2.micro) with IAM role access to DynamoDB.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dynamodbpoc
+    AllowedPattern: '[a-zA-Z0-9-]+'
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where EC2 instance will run.
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet with route to internet gateway.
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 key pair for SSH access.
+  AllowedSshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH (port 22). Restrict this in real environments.
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+    Description: Choose t2.micro for AWS free tier eligibility where available.
+  AppPort:
+    Type: Number
+    Default: 8080
+  DynamoTableName:
+    Type: String
+    Default: records
+  CreateDynamoTable:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Set true to create DynamoDB table if it does not exist.
+  JarS3Bucket:
+    Type: String
+    Description: S3 bucket containing the built app JAR.
+  JarS3Key:
+    Type: String
+    Description: S3 key path to the built app JAR, for example releases/DynamoDBPOC-0.0.1-SNAPSHOT.jar.
+
+Conditions:
+  ShouldCreateTable: !Equals [!Ref CreateDynamoTable, 'true']
+
+Resources:
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName} security group'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSshCidr
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          CidrIp: 0.0.0.0/0
+
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: !Sub '${ProjectName}-dynamodb-access'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${JarS3Bucket}/${JarS3Key}'
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppRole
+
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    Condition: ShouldCreateTable
+    Properties:
+      TableName: !Ref DynamoTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref AppInstanceProfile
+      SubnetId: !Ref PublicSubnetId
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      KeyName: !Ref KeyPairName
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ec2'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          dnf update -y
+          dnf install -y java-21-amazon-corretto aws-cli
+
+          mkdir -p /opt/${ProjectName}
+          aws s3 cp s3://${JarS3Bucket}/${JarS3Key} /opt/${ProjectName}/app.jar
+
+          cat > /etc/systemd/system/${ProjectName}.service <<EOF
+          [Unit]
+          Description=${ProjectName} Spring Boot API
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/opt/${ProjectName}
+          Environment=AWS_DYNAMODB_PROFILE=
+          Environment=AWS_DYNAMODB_REGION=${AWS::Region}
+          Environment=AWS_DYNAMODB_TABLE_NAME=${DynamoTableName}
+          Environment=AWS_DYNAMODB_AUTO_CREATE_TABLE=false
+          Environment=SPRINGDOC_SWAGGER_UI_PATH=/swagger-ui
+          ExecStart=/usr/bin/java -jar /opt/${ProjectName}/app.jar
+          SuccessExitStatus=143
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          chown -R ec2-user:ec2-user /opt/${ProjectName}
+          systemctl daemon-reload
+          systemctl enable ${ProjectName}
+          systemctl start ${ProjectName}
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance id
+    Value: !Ref AppInstance
+  PublicIp:
+    Description: Public IP of EC2 instance
+    Value: !GetAtt AppInstance.PublicIp
+  ApiBaseUrl:
+    Description: API base URL
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:${AppPort}'
+  SwaggerUrl:
+    Description: Swagger UI URL
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:${AppPort}/swagger-ui'
+

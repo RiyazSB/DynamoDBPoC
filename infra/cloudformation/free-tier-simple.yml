@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  DynamoDBPOC - free-tier EC2 deployment.
+  Uses an existing S3 bucket (pre-created via console) to download the JAR.
+  Creates EC2 t2.micro with IAM role for DynamoDB.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dynamodbpoc
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  DynamoTableName:
+    Type: String
+    Default: records
+  AppPort:
+    Type: Number
+    Default: 8080
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t4g.micro
+    Description: Free-tier eligible type can vary by account/region.
+  ArtifactBucketName:
+    Type: String
+    Default: riyaz-dynamodbpoc-artifacts
+    Description: Name of the S3 bucket where you uploaded the application JAR.
+  JarObjectKey:
+    Type: String
+    Default: DynamoDBPOC-0.0.1-SNAPSHOT.jar
+    Description: S3 object key for the application JAR.
+
+Resources:
+
+  # ── Security group ───────────────────────────────────────────────────────
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName} - allow app port inbound'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          CidrIp: 0.0.0.0/0
+
+  # ── IAM role + instance profile ──────────────────────────────────────────
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}'
+        - PolicyName: S3ArtifactRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppRole
+
+  # ── EC2 instance (t2.micro = free tier eligible) ─────────────────────────
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !If
+        - UseArmAmi
+        - !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64}}'
+        - !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref AppInstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ec2'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          # Install Java 21 and AWS CLI
+          dnf update -y
+          dnf install -y java-21-amazon-corretto aws-cli
+
+          # Create app directory
+          mkdir -p /opt/${ProjectName}
+
+          # Download JAR from S3
+          aws s3 cp s3://${ArtifactBucketName}/${JarObjectKey} /opt/${ProjectName}/app.jar
+
+          # Create systemd service
+          cat > /etc/systemd/system/${ProjectName}.service <<EOF
+          [Unit]
+          Description=${ProjectName} Spring Boot API
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/opt/${ProjectName}
+          Environment="AWS_DYNAMODB_PROFILE="
+          Environment="AWS_DYNAMODB_REGION=${AWS::Region}"
+          Environment="AWS_DYNAMODB_TABLE_NAME=${DynamoTableName}"
+          Environment="AWS_DYNAMODB_AUTO_CREATE_TABLE=false"
+          Environment="SPRINGDOC_SWAGGER_UI_PATH=/swagger-ui"
+          ExecStart=/usr/bin/java -jar /opt/${ProjectName}/app.jar
+          SuccessExitStatus=143
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          chown -R ec2-user:ec2-user /opt/${ProjectName}
+          systemctl daemon-reload
+          systemctl enable ${ProjectName}
+          systemctl start ${ProjectName}
+
+Conditions:
+  UseArmAmi: !Equals [!Ref InstanceType, t4g.micro]
+
+Outputs:
+  ArtifactBucketName:
+    Description: S3 bucket storing the application JAR
+    Value: !Ref ArtifactBucketName
+  JarObjectKey:
+    Description: S3 object key of the application JAR
+    Value: !Ref JarObjectKey
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref AppInstance
+  PublicIp:
+    Description: Public IP of EC2 instance
+    Value: !GetAtt AppInstance.PublicIp
+  ApiBaseUrl:
+    Description: API base URL
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:${AppPort}'
+  SwaggerUrl:
+    Description: Swagger UI
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:${AppPort}/swagger-ui'
+

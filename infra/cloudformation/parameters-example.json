@@ -1,0 +1,43 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "dynamodb-poc"
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-xxxxxxxx"
+  },
+  {
+    "ParameterKey": "PublicSubnet1",
+    "ParameterValue": "subnet-aaaaaaaa"
+  },
+  {
+    "ParameterKey": "PublicSubnet2",
+    "ParameterValue": "subnet-bbbbbbbb"
+  },
+  {
+    "ParameterKey": "ContainerImage",
+    "ParameterValue": "123456789012.dkr.ecr.us-east-1.amazonaws.com/dynamodbpoc:latest"
+  },
+  {
+    "ParameterKey": "DynamoTableName",
+    "ParameterValue": "records"
+  },
+  {
+    "ParameterKey": "ContainerPort",
+    "ParameterValue": "8080"
+  },
+  {
+    "ParameterKey": "DesiredCount",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "TaskCpu",
+    "ParameterValue": "512"
+  },
+  {
+    "ParameterKey": "TaskMemory",
+    "ParameterValue": "1024"
+  }
+]
+

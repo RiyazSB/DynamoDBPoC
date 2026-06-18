@@ -1,0 +1,47 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "dynamodbpoc"
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-xxxxxxxx"
+  },
+  {
+    "ParameterKey": "PublicSubnetId",
+    "ParameterValue": "subnet-xxxxxxxx"
+  },
+  {
+    "ParameterKey": "KeyPairName",
+    "ParameterValue": "my-ec2-keypair"
+  },
+  {
+    "ParameterKey": "AllowedSshCidr",
+    "ParameterValue": "0.0.0.0/0"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t2.micro"
+  },
+  {
+    "ParameterKey": "AppPort",
+    "ParameterValue": "8080"
+  },
+  {
+    "ParameterKey": "DynamoTableName",
+    "ParameterValue": "records"
+  },
+  {
+    "ParameterKey": "CreateDynamoTable",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "JarS3Bucket",
+    "ParameterValue": "my-artifacts-bucket"
+  },
+  {
+    "ParameterKey": "JarS3Key",
+    "ParameterValue": "releases/DynamoDBPOC-0.0.1-SNAPSHOT.jar"
+  }
+]
+
