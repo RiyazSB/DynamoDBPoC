@@ -58,6 +58,24 @@ Parameters:
       - 90
     Description: Retention (days) for API Gateway access logs.
 
+  CacheType:
+    Type: String
+    Default: simple
+    AllowedValues:
+      - simple
+      - redis
+    Description: Cache mode for the app. Use redis to enable Redis-backed caching.
+
+  RedisHost:
+    Type: String
+    Default: 127.0.0.1
+    Description: Redis host used by the application when CacheType=redis.
+
+  RedisPort:
+    Type: Number
+    Default: 6379
+    Description: Redis port used by the application when CacheType=redis.
+
 Resources:
 
   # Optional DynamoDB table managed by this stack.
@@ -151,6 +169,15 @@ Resources:
           dnf update -y
           dnf install -y java-21-amazon-corretto aws-cli
 
+          # Install and start Redis locally when cache mode is redis.
+          if [ "${CacheType}" = "redis" ]; then
+            dnf install -y redis6 || dnf install -y redis
+            systemctl enable redis6 || true
+            systemctl start redis6 || true
+            systemctl enable redis || true
+            systemctl start redis || true
+          fi
+
           mkdir -p /opt/${ProjectName}
           aws s3 cp s3://${ArtifactBucketName}/${JarObjectKey} /opt/${ProjectName}/app.jar
 
@@ -167,6 +194,9 @@ Resources:
           Environment="AWS_DYNAMODB_REGION=${AWS::Region}"
           Environment="AWS_DYNAMODB_TABLE_NAME=${DynamoTableName}"
           Environment="AWS_DYNAMODB_AUTO_CREATE_TABLE=false"
+          Environment="SPRING_CACHE_TYPE=${CacheType}"
+          Environment="REDIS_HOST=${RedisHost}"
+          Environment="REDIS_PORT=${RedisPort}"
           Environment="SPRINGDOC_SWAGGER_UI_PATH=/swagger-ui"
           ExecStart=/usr/bin/java -jar /opt/${ProjectName}/app.jar
           SuccessExitStatus=143
@@ -277,4 +307,10 @@ Outputs:
   ApiAccessLogGroupName:
     Description: CloudWatch log group for API Gateway access logs
     Value: !Ref ApiAccessLogGroup
+  EffectiveCacheType:
+    Description: Cache type used by the application
+    Value: !Ref CacheType
+  EffectiveRedisEndpoint:
+    Description: Redis endpoint configured for the application
+    Value: !Sub '${RedisHost}:${RedisPort}'
 

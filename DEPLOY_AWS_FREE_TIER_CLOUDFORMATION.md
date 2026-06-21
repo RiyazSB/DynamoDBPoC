@@ -36,6 +36,22 @@ The single-stack template enables API Gateway HTTP API access logging to CloudWa
 You can view logs in **CloudWatch -> Logs -> Log groups** using the output name.
 Each request includes method, path, status, source IP, integration status, and latency.
 
+## Redis via CloudFormation (same EC2)
+
+The single-stack template supports cache mode selection with parameters:
+
+- `CacheType`:
+  - `simple` (default): in-memory cache, no Redis requirement
+  - `redis`: installs Redis on the same EC2 during bootstrap and app uses Redis
+- `RedisHost` (default `127.0.0.1`)
+- `RedisPort` (default `6379`)
+
+For first-time Redis enablement on same EC2, use:
+
+- `CacheType=redis`
+- `RedisHost=127.0.0.1`
+- `RedisPort=6379`
+
 ## Quick deploy (recommended)
 
 ```powershell
@@ -70,6 +86,9 @@ Set-Location "C:\Users\riyazsb\Downloads\DynamoDBPOC\DynamoDBPOC"
    - `DynamoTableName=records`
    - `CreateDynamoTable=false` (or `true` for new table creation)
    - `ApiAccessLogRetentionDays=7`
+   - `CacheType=simple` (or `redis` to enable Redis cache)
+   - `RedisHost=127.0.0.1`
+   - `RedisPort=6379`
    - Choose your `VpcId` and `SubnetId`
 5. After stack completes, use outputs:
    - `ApiGatewayEndpoint`

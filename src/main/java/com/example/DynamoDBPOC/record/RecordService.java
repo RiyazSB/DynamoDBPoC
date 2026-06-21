@@ -5,6 +5,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.CachePut;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.stereotype.Service;
 
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
@@ -19,6 +23,10 @@ public class RecordService {
         this.recordTable = recordTable;
     }
 
+    @Caching(
+            put = @CachePut(cacheNames = "recordsById", key = "#result.id"),
+            evict = @CacheEvict(cacheNames = "recordsAll", allEntries = true)
+    )
     public RecordItem createRecord(RecordRequest request) {
         String now = Instant.now().toString();
 
@@ -33,6 +41,7 @@ public class RecordService {
         return item;
     }
 
+    @Cacheable(cacheNames = "recordsById", key = "#id")
     public RecordItem getRecord(String id) {
         RecordItem item = recordTable.getItem(Key.builder().partitionValue(id).build());
         if (item == null) {
@@ -41,12 +50,17 @@ public class RecordService {
         return item;
     }
 
+    @Cacheable(cacheNames = "recordsAll")
     public List<RecordItem> getAllRecords() {
         List<RecordItem> records = new ArrayList<>();
         recordTable.scan().items().forEach(records::add);
         return records;
     }
 
+    @Caching(
+            put = @CachePut(cacheNames = "recordsById", key = "#id"),
+            evict = @CacheEvict(cacheNames = "recordsAll", allEntries = true)
+    )
     public RecordItem updateRecord(String id, RecordRequest request) {
         RecordItem existing = getRecord(id);
         existing.setName(request.getName());
@@ -57,6 +71,10 @@ public class RecordService {
         return existing;
     }
 
+    @Caching(evict = {
+            @CacheEvict(cacheNames = "recordsById", key = "#id"),
+            @CacheEvict(cacheNames = "recordsAll", allEntries = true)
+    })
     public void deleteRecord(String id) {
         RecordItem existing = getRecord(id);
         recordTable.deleteItem(existing);
