@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Schedules automated CloudFormation stack deletion at a fixed UTC cron time.
+  Use with caution: deletes stacks permanently.
+
+Parameters:
+  SchedulerName:
+    Type: String
+    Default: cfn-stack-cleanup
+    Description: Prefix for cleanup resources.
+
+  ScheduleExpressionUtc:
+    Type: String
+    Default: cron(0 19 * * ? *)
+    Description: EventBridge cron in UTC. Example 01:30 UTC daily => cron(30 1 * * ? *)
+
+  StackPrefix:
+    Type: String
+    Default: ""
+    Description: Optional - delete stacks whose names start with this prefix.
+
+  StackNamesCsv:
+    Type: String
+    Default: ""
+    Description: Optional - comma-separated exact stack names to delete.
+
+  ExcludeStacksCsv:
+    Type: String
+    Default: ""
+    Description: Optional - comma-separated stack names to never delete.
+
+  DryRun:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+    Description: true = log only, false = actually call DeleteStack.
+
+Resources:
+  CleanupLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SchedulerName}-lambda
+      RetentionInDays: 14
+
+  CleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CleanupPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${SchedulerName}-lambda:*
+              - Effect: Allow
+                Action:
+                  - cloudformation:ListStacks
+                  - cloudformation:DeleteStack
+                Resource: "*"
+
+  CleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${SchedulerName}-lambda
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 60
+      Role: !GetAtt CleanupRole.Arn
+      Environment:
+        Variables:
+          STACK_PREFIX: !Ref StackPrefix
+          STACK_NAMES_CSV: !Ref StackNamesCsv
+          EXCLUDE_STACKS_CSV: !Ref ExcludeStacksCsv
+          DRY_RUN: !Ref DryRun
+          SELF_STACK_NAME: !Ref AWS::StackName
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+
+          cfn = boto3.client("cloudformation")
+
+
+          def _csv_set(env_name):
+              raw = os.getenv(env_name, "").strip()
+              if not raw:
+                  return set()
+              return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+          def lambda_handler(event, context):
+              prefix = os.getenv("STACK_PREFIX", "").strip()
+              explicit = _csv_set("STACK_NAMES_CSV")
+              exclude = _csv_set("EXCLUDE_STACKS_CSV")
+              dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+              self_stack = os.getenv("SELF_STACK_NAME", "")
+
+              # Safety guard: do nothing unless prefix or explicit list is set.
+              if not prefix and not explicit:
+                  msg = "No STACK_PREFIX or STACK_NAMES_CSV configured. Nothing to delete."
+                  print(msg)
+                  return {"message": msg, "deleted": [], "dryRun": dry_run}
+
+              statuses = {
+                  "CREATE_COMPLETE",
+                  "UPDATE_COMPLETE",
+                  "UPDATE_ROLLBACK_COMPLETE",
+                  "ROLLBACK_COMPLETE",
+              }
+
+              candidates = []
+              paginator = cfn.get_paginator("list_stacks")
+              for page in paginator.paginate(StackStatusFilter=list(statuses)):
+                  for s in page.get("StackSummaries", []):
+                      name = s.get("StackName", "")
+
+                      if name == self_stack:
+                          continue
+
+                      if name in exclude:
+                          continue
+
+                      by_prefix = prefix and name.startswith(prefix)
+                      by_explicit = name in explicit
+
+                      if by_prefix or by_explicit:
+                          candidates.append(name)
+
+              print("Candidates:", candidates)
+
+              deleted = []
+              if not dry_run:
+                  for name in candidates:
+                      print(f"Deleting stack: {name}")
+                      cfn.delete_stack(StackName=name)
+                      deleted.append(name)
+
+              return {
+                  "dryRun": dry_run,
+                  "candidates": candidates,
+                  "deleted": deleted,
+                  "count": len(candidates),
+              }
+
+  CleanupRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${SchedulerName}-rule
+      Description: Scheduled CloudFormation stack cleanup rule
+      ScheduleExpression: !Ref ScheduleExpressionUtc
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CleanupFunction.Arn
+          Id: CleanupLambdaTarget
+
+  CleanupRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CleanupFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CleanupRule.Arn
+
+Outputs:
+  CleanupFunctionName:
+    Description: Lambda function name for manual test invoke
+    Value: !Ref CleanupFunction
+
+  CleanupRuleName:
+    Description: EventBridge rule name
+    Value: !Ref CleanupRule
+
