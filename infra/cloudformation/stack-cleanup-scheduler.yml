@@ -70,6 +70,63 @@ Resources:
                 Action:
                   - cloudformation:ListStacks
                   - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResources
+                Resource: "*"
+              # Permissions needed to delete resources inside target stacks
+              - Effect: Allow
+                Action:
+                  - lambda:RemovePermission
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetPolicy
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:PassRole
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - apigateway:DELETE
+                  - apigateway:GET
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                  - events:DescribeRule
+                  - events:ListTargetsByRule
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - bedrock:DeleteAgent
+                  - bedrock:GetAgent
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:DeleteTable
+                  - dynamodb:DescribeTable
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:DeleteBucket
+                  - s3:DeleteBucketPolicy
                 Resource: "*"
 
   CleanupFunction:
@@ -110,6 +167,13 @@ Resources:
               dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
               self_stack = os.getenv("SELF_STACK_NAME", "")
 
+              print("=== CONFIG ===")
+              print("STACK_PREFIX: '" + prefix + "'")
+              print("STACK_NAMES_CSV: " + str(explicit))
+              print("EXCLUDE_STACKS_CSV: " + str(exclude))
+              print("DRY_RUN: " + str(dry_run))
+              print("SELF_STACK_NAME: " + self_stack)
+
               # Safety guard: do nothing unless prefix or explicit list is set.
               if not prefix and not explicit:
                   msg = "No STACK_PREFIX or STACK_NAMES_CSV configured. Nothing to delete."
@@ -121,32 +185,43 @@ Resources:
                   "UPDATE_COMPLETE",
                   "UPDATE_ROLLBACK_COMPLETE",
                   "ROLLBACK_COMPLETE",
+                  "DELETE_FAILED",
+                  "CREATE_FAILED",
+                  "ROLLBACK_FAILED",
               }
+
+              print("Scanning statuses: " + str(statuses))
 
               candidates = []
               paginator = cfn.get_paginator("list_stacks")
               for page in paginator.paginate(StackStatusFilter=list(statuses)):
                   for s in page.get("StackSummaries", []):
                       name = s.get("StackName", "")
+                      status = s.get("StackStatus", "")
+                      print("Found stack: " + name + " [" + status + "]")
 
                       if name == self_stack:
+                          print("  -> Skipping self: " + name)
                           continue
 
                       if name in exclude:
+                          print("  -> Excluded: " + name)
                           continue
 
                       by_prefix = prefix and name.startswith(prefix)
                       by_explicit = name in explicit
+                      print("  -> by_prefix=" + str(by_prefix) + ", by_explicit=" + str(by_explicit))
 
                       if by_prefix or by_explicit:
                           candidates.append(name)
+                          print("  -> Added to candidates")
 
-              print("Candidates:", candidates)
+              print("Final candidates: " + str(candidates))
 
               deleted = []
               if not dry_run:
                   for name in candidates:
-                      print(f"Deleting stack: {name}")
+                      print("Deleting stack: " + name)
                       cfn.delete_stack(StackName=name)
                       deleted.append(name)
 
